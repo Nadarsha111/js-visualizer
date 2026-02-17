@@ -79,6 +79,16 @@ export class Interpreter {
   }
 
   private executeTask(task: Task) {
+    // If callback is a function (internal helper), execute it directly
+    if (typeof task.callback === "function") {
+      this.createSnapshot(
+        0,
+        `Executing ${task.type} task: ${task.description}`,
+      );
+      task.callback();
+      return;
+    }
+
     this.createSnapshot(
       (task.callback as any).loc.start.line,
       `Executing ${task.type} task: ${task.description}`,
@@ -234,6 +244,8 @@ export class Interpreter {
         return node; // Return the node itself to be used as callback
       case "FunctionExpression":
         return node;
+      case "ArrayExpression":
+        return node.elements.map((el: any) => this.visit(el));
       case "ReturnStatement":
         this.createSnapshot(node.loc.start.line, "Returning value");
         return this.visit(node.argument);
@@ -314,12 +326,46 @@ export class Interpreter {
       return;
     }
 
-    // Handle setTimeout
-    if (node.callee.name === "setTimeout") {
-      const callbackNode = node.arguments[0];
-      // const delay = node.arguments[1]?.value || 0; // We ignore delay for visualization steps ordering usually, or handle it?
-      // In this simple visualizer, we just push to callbackQueue.
+    // Handle Promise.all
+    if (
+      node.callee.type === "MemberExpression" &&
+      node.callee.object.name === "Promise" &&
+      node.callee.property.name === "all"
+    ) {
+      const args = node.arguments.map((arg: any) => this.visit(arg));
+      return this.handlePromiseAll(args[0]);
+    }
 
+    // Handle Promise.race
+    if (
+      node.callee.type === "MemberExpression" &&
+      node.callee.object.name === "Promise" &&
+      node.callee.property.name === "race"
+    ) {
+      const args = node.arguments.map((arg: any) => this.visit(arg));
+      // Simple race implementation: first one to resolve wins
+      // We can reuse handlePromiseAll logic but resolve on first completion
+      // For now, let's just use handlePromiseRace placeholder
+      return this.handlePromiseRace(args[0]);
+    }
+
+    // Handle .then()
+    if (
+      node.callee.type === "MemberExpression" &&
+      node.callee.property.name === "then"
+    ) {
+      const obj = this.visit(node.callee.object);
+      if (obj && obj.__type === "Promise") {
+        return this.handlePromiseThen(obj, node.arguments[0]);
+      }
+    }
+
+    // Handle setTimeout
+    if (
+      node.callee.type === "Identifier" &&
+      node.callee.name === "setTimeout"
+    ) {
+      const callbackNode = node.arguments[0];
       const task: Task = {
         id: uuidv4(),
         type: "macro",
@@ -333,8 +379,23 @@ export class Interpreter {
       return;
     }
 
-    const funcName = node.callee.name;
-    const func = this.getVariable(funcName);
+    // Handle fetch
+    if (node.callee.type === "Identifier" && node.callee.name === "fetch") {
+      const url = this.visit(node.arguments[0]);
+      return this.handleFetch(url);
+    }
+
+    let funcName = "";
+    let func;
+
+    if (node.callee.type === "Identifier") {
+      funcName = node.callee.name;
+      func = this.getVariable(funcName);
+    } else {
+      // It might be a MemberExpression or other expression that returns a function
+      func = this.visit(node.callee);
+      funcName = func?.name || "anonymous";
+    }
 
     if (func && func.type === "function") {
       const args = node.arguments.map((arg: any) => this.visit(arg));
@@ -368,5 +429,192 @@ export class Interpreter {
 
       return result;
     }
+  }
+
+  // Helper to create a promise object
+  private createPromise() {
+    return {
+      __type: "Promise",
+      id: uuidv4(),
+      state: "pending",
+      value: undefined,
+      handlers: [] as any[],
+    };
+  }
+
+  // Helper to resolve a promise
+  private resolvePromise(promise: any, value: any) {
+    if (promise.state !== "pending") return;
+    promise.state = "fulfilled";
+    promise.value = value;
+
+    // Queue microtasks for handlers
+    promise.handlers.forEach((handler: any) => {
+      this.state.eventLoop.microtaskQueue.push({
+        id: uuidv4(),
+        type: "micro",
+        description: "Promise reaction",
+        callback: () => {
+          handler(value);
+        },
+        createdAt: Date.now(),
+      });
+    });
+    promise.handlers = [];
+  }
+
+  private handleFetch(url: string) {
+    const promise = this.createPromise();
+
+    // Schedule macro task for network response
+    this.state.eventLoop.callbackQueue.push({
+      id: uuidv4(),
+      type: "macro",
+      description: `Fetch response from ${url}`,
+      callback: () => {
+        this.resolvePromise(promise, { status: 200, url });
+      },
+      createdAt: Date.now(),
+    });
+
+    return promise;
+  }
+
+  private handlePromiseAll(promises: any[]) {
+    const resultPromise = this.createPromise();
+    if (!Array.isArray(promises) || promises.length === 0) {
+      this.resolvePromise(resultPromise, []);
+      return resultPromise;
+    }
+
+    const results = new Array(promises.length);
+    let completed = 0;
+
+    promises.forEach((p, index) => {
+      if (p && p.__type === "Promise") {
+        if (p.state === "fulfilled") {
+          results[index] = p.value;
+          completed++;
+        } else {
+          p.handlers.push((val: any) => {
+            results[index] = val;
+            completed++;
+            if (completed === promises.length) {
+              this.resolvePromise(resultPromise, results);
+            }
+          });
+        }
+      } else {
+        results[index] = p;
+        completed++;
+      }
+    });
+
+    if (completed === promises.length) {
+      this.resolvePromise(resultPromise, results);
+    }
+
+    return resultPromise;
+  }
+
+  private handlePromiseRace(promises: any[]) {
+    const resultPromise = this.createPromise();
+    if (!Array.isArray(promises) || promises.length === 0) {
+      // Promise.race([]) stays pending forever
+      return resultPromise;
+    }
+
+    promises.forEach((p) => {
+      if (p && p.__type === "Promise") {
+        if (p.state === "fulfilled") {
+          this.resolvePromise(resultPromise, p.value);
+        } else {
+          p.handlers.push((val: any) => {
+            this.resolvePromise(resultPromise, val);
+          });
+        }
+      } else {
+        this.resolvePromise(resultPromise, p);
+      }
+    });
+
+    return resultPromise;
+  }
+
+  private handlePromiseThen(promise: any, onFulfilledNode: any) {
+    const nextPromise = this.createPromise();
+
+    const handler = (val: any) => {
+      if (onFulfilledNode) {
+        // Create a scope and execute the function
+        let func = onFulfilledNode;
+        if (onFulfilledNode.type === "Identifier") {
+          func = this.getVariable(onFulfilledNode.name);
+        } else if (onFulfilledNode.type === "MemberExpression") {
+          // Not supported in this simple version
+          func = undefined;
+        }
+
+        if (
+          func &&
+          (func.type === "function" ||
+            func.type === "FunctionExpression" ||
+            func.type === "ArrowFunctionExpression")
+        ) {
+          this.createSnapshot(0, "Executing .then callback");
+
+          // Determine function name
+          const funcName = func.name || func.id?.name || "anonymous";
+
+          // Push Stack
+          const frame: CallFrame = {
+            id: uuidv4(),
+            functionName: funcName,
+            lineNumber: 0,
+            arguments: [val],
+            localVariables: {},
+            scopeId: uuidv4(),
+            thisObject: {},
+          };
+          this.state.callStack.push(frame);
+
+          // Create Scope
+          this.createScope("function", funcName);
+
+          // Bind arg
+          const paramName = func.params?.[0]?.name;
+          if (paramName) {
+            this.addVariable(paramName, val, "let");
+          }
+
+          // Visit body
+          const result = this.visit(func.body);
+
+          // Pop
+          this.popScope();
+          this.state.callStack.pop();
+
+          this.resolvePromise(nextPromise, result);
+        } else {
+          this.resolvePromise(nextPromise, val);
+        }
+      } else {
+        this.resolvePromise(nextPromise, val);
+      }
+    };
+
+    if (promise.state === "fulfilled") {
+      this.state.eventLoop.microtaskQueue.push({
+        id: uuidv4(),
+        type: "micro",
+        description: "Promise.then callback",
+        callback: () => handler(promise.value),
+        createdAt: Date.now(),
+      });
+    } else {
+      promise.handlers.push(handler);
+    }
+
+    return nextPromise;
   }
 }
