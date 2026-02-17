@@ -74,6 +74,12 @@ export class Interpreter {
       if (this.state.eventLoop.callbackQueue.length > 0) {
         const task = this.state.eventLoop.callbackQueue.shift()!;
         this.executeTask(task);
+        
+        // After macrotask, check microtasks again!
+        while (this.state.eventLoop.microtaskQueue.length > 0) {
+          const microTask = this.state.eventLoop.microtaskQueue.shift()!;
+          this.executeTask(microTask);
+        }
       }
     }
   }
