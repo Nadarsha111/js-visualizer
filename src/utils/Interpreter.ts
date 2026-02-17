@@ -225,6 +225,8 @@ export class Interpreter {
         return this.visitBlock(node.body);
       case "VariableDeclaration":
         return this.visitVariableDeclaration(node);
+      case "IfStatement":
+        return this.visitIfStatement(node);
       case "ExpressionStatement":
         this.createSnapshot(node.loc.start.line, "Executing expression");
         return this.visit(node.expression);
@@ -246,6 +248,8 @@ export class Interpreter {
         return node;
       case "ArrayExpression":
         return node.elements.map((el: any) => this.visit(el));
+      case "LogicalExpression":
+        return this.visitLogicalExpression(node);
       case "ReturnStatement":
         this.createSnapshot(node.loc.start.line, "Returning value");
         return this.visit(node.argument);
@@ -292,6 +296,53 @@ export class Interpreter {
         return left * right;
       case "/":
         return left / right;
+      case "===":
+        return left === right;
+      case "!==":
+        return left !== right;
+      case "==":
+        return left == right;
+      case "!=":
+        return left != right;
+      case "<":
+        return left < right;
+      case "<=":
+        return left <= right;
+      case ">":
+        return left > right;
+      case ">=":
+        return left >= right;
+      default:
+        return undefined;
+    }
+  }
+
+  private visitIfStatement(node: any) {
+    const testResult = this.visit(node.test);
+
+    if (testResult) {
+      this.createSnapshot(node.loc.start.line, "If condition true");
+      return this.visit(node.consequent);
+    } else if (node.alternate) {
+      this.createSnapshot(node.loc.start.line, "If condition false");
+      return this.visit(node.alternate);
+    }
+
+    return undefined;
+  }
+
+  private visitLogicalExpression(node: any) {
+    switch (node.operator) {
+      case "||": {
+        const left = this.visit(node.left);
+        if (left) return left;
+        return this.visit(node.right);
+      }
+      case "&&": {
+        const left = this.visit(node.left);
+        if (!left) return left;
+        return this.visit(node.right);
+      }
       default:
         return undefined;
     }
