@@ -74,7 +74,7 @@ export class Interpreter {
       if (this.state.eventLoop.callbackQueue.length > 0) {
         const task = this.state.eventLoop.callbackQueue.shift()!;
         this.executeTask(task);
-        
+
         // After macrotask, check microtasks again!
         while (this.state.eventLoop.microtaskQueue.length > 0) {
           const microTask = this.state.eventLoop.microtaskQueue.shift()!;
@@ -233,6 +233,8 @@ export class Interpreter {
         return this.visitVariableDeclaration(node);
       case "IfStatement":
         return this.visitIfStatement(node);
+      case "ForStatement":
+        return this.visitForStatement(node);
       case "ExpressionStatement":
         this.createSnapshot(node.loc.start.line, "Executing expression");
         return this.visit(node.expression);
@@ -244,6 +246,10 @@ export class Interpreter {
         return this.getVariable(node.name);
       case "BinaryExpression":
         return this.visitBinaryExpression(node);
+      case "AssignmentExpression":
+        return this.visitAssignmentExpression(node);
+      case "UpdateExpression":
+        return this.visitUpdateExpression(node);
       case "FunctionDeclaration":
         return this.visitFunctionDeclaration(node);
       case "BlockStatement":
@@ -254,6 +260,8 @@ export class Interpreter {
         return node;
       case "ArrayExpression":
         return node.elements.map((el: any) => this.visit(el));
+      case "MemberExpression":
+        return this.visitMemberExpression(node);
       case "LogicalExpression":
         return this.visitLogicalExpression(node);
       case "ReturnStatement":
@@ -323,6 +331,29 @@ export class Interpreter {
     }
   }
 
+  private visitForStatement(node: any) {
+    if (node.init) {
+      if (node.init.type === "VariableDeclaration") {
+        this.visitVariableDeclaration(node.init);
+      } else {
+        this.visit(node.init);
+      }
+    }
+
+    while (true) {
+      if (node.test) {
+        const testResult = this.visit(node.test);
+        if (!testResult) break;
+      }
+
+      this.visit(node.body);
+
+      if (node.update) {
+        this.visit(node.update);
+      }
+    }
+  }
+
   private visitIfStatement(node: any) {
     const testResult = this.visit(node.test);
 
@@ -352,6 +383,87 @@ export class Interpreter {
       default:
         return undefined;
     }
+  }
+
+  private visitMemberExpression(node: any) {
+    const obj = this.visit(node.object);
+    if (node.computed) {
+      const prop = this.visit(node.property);
+      return obj[prop];
+    }
+    const propName = node.property.name;
+    return obj[propName];
+  }
+
+  private assignToPattern(target: any, value: any) {
+    if (target.type === "Identifier") {
+      try {
+        this.updateVariable(target.name, value);
+      } catch {
+        this.addVariable(target.name, value, "let");
+      }
+      return;
+    }
+
+    if (target.type === "MemberExpression") {
+      const obj = this.visit(target.object);
+      const prop = target.computed
+        ? this.visit(target.property)
+        : target.property.name;
+      obj[prop] = value;
+      return;
+    }
+  }
+
+  private visitAssignmentExpression(node: any) {
+    if (node.operator !== "=") {
+      return undefined;
+    }
+
+    if (node.left.type === "ArrayPattern") {
+      const rightVal = this.visit(node.right);
+      if (!Array.isArray(rightVal)) {
+        return undefined;
+      }
+      node.left.elements.forEach((el: any, index: number) => {
+        if (!el) return;
+        this.assignToPattern(el, rightVal[index]);
+      });
+      return rightVal;
+    }
+
+    const value = this.visit(node.right);
+    this.assignToPattern(node.left, value);
+    return value;
+  }
+
+  private visitUpdateExpression(node: any) {
+    const isIncrement = node.operator === "++";
+    const isDecrement = node.operator === "--";
+    if (!isIncrement && !isDecrement) {
+      return undefined;
+    }
+
+    let oldValue;
+    let newValue;
+
+    if (node.argument.type === "Identifier") {
+      oldValue = this.getVariable(node.argument.name);
+      newValue = isIncrement ? oldValue + 1 : oldValue - 1;
+      this.updateVariable(node.argument.name, newValue);
+    } else if (node.argument.type === "MemberExpression") {
+      const obj = this.visit(node.argument.object);
+      const prop = node.argument.computed
+        ? this.visit(node.argument.property)
+        : node.argument.property.name;
+      oldValue = obj[prop];
+      newValue = isIncrement ? oldValue + 1 : oldValue - 1;
+      obj[prop] = newValue;
+    } else {
+      return undefined;
+    }
+
+    return node.prefix ? newValue : oldValue;
   }
 
   private visitFunctionDeclaration(node: any) {
